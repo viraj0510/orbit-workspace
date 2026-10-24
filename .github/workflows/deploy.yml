@@ -1,0 +1,97 @@
+name: Deploy EKS platform (billable alternate)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: orbit-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_TO_ASSUME: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      ALB_SECURITY_GROUP_ID: ${{ vars.ALB_SECURITY_GROUP_ID }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Validate deployment configuration
+        run: |
+          test -n "$AWS_REGION" || { echo "Set repository variable AWS_REGION"; exit 1; }
+          test -n "$AWS_ROLE_TO_ASSUME" || { echo "Set repository variable AWS_DEPLOY_ROLE_ARN"; exit 1; }
+          test -n "$ALB_SECURITY_GROUP_ID" || { echo "Set repository variable ALB_SECURITY_GROUP_ID"; exit 1; }
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and publish immutable image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/orbit-workspace:${{ github.sha }}
+          build-args: |
+            VITE_GOOGLE_CLIENT_ID=${{ vars.VITE_GOOGLE_CLIENT_ID }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan published image for critical and high vulnerabilities
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          image-ref: ${{ steps.ecr.outputs.registry }}/orbit-workspace:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      - name: Point Argo CD at the new image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+          ALB_SECURITY_GROUP_ID: ${{ env.ALB_SECURITY_GROUP_ID }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          path = pathlib.Path("deploy/chart/values-prod.yaml")
+          content = path.read_text()
+          replacements = {
+              r"(?m)^  repository:.*$": f"  repository: {os.environ['ECR_REGISTRY']}/orbit-workspace",
+              r"(?m)^  tag:.*$": f"  tag: {os.environ['IMAGE_TAG']}",
+              r"(?m)^  albSecurityGroupId:.*$": f"  albSecurityGroupId: {os.environ['ALB_SECURITY_GROUP_ID']}",
+          }
+          for pattern, replacement in replacements.items():
+              content, count = re.subn(pattern, lambda _: replacement, content, count=1)
+              if count != 1:
+                  raise SystemExit(f"Expected one chart value for {pattern}; found {count}")
+          path.write_text(content)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deploy/chart/values-prod.yaml
+          if ! git diff --cached --quiet; then
+            git commit -m "deploy: Orbit image ${GITHUB_SHA} [skip ci]"
+            git push origin HEAD:main
+          fi

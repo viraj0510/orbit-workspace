@@ -1,0 +1,36 @@
+replicaCount: 2
+
+image:
+  repository: ""
+  tag: bootstrap
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: orbit-workspace
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 4000
+
+ingress:
+  enabled: true
+  albSecurityGroupId: ""
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 75
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 384Mi
+  limits:
+    cpu: "1"
+    memory: 768Mi
+
+podDisruptionBudget:
+  minAvailable: 1

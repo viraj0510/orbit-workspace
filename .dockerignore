@@ -1,0 +1,14 @@
+.git
+.github
+.terraform
+dist
+node_modules
+.env
+.env.*
+!.env.example
+prisma/*.db
+prisma/*.db-journal
+infra
+deploy
+README.md
+*.log

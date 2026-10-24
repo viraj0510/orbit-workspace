@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "server/**"
+      - "prisma/**"
+      - "package.json"
+      - "package-lock.json"
+      - "vite.config.js"
+      - "index.html"
+      - "Dockerfile"
+      - "Dockerfile.ec2"
+      - "infra/ec2-demo/**"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/deploy-ec2.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive infra/ec2-demo
+
+      - name: Initialize Terraform providers
+        run: terraform -chdir=infra/ec2-demo init -backend=false -input=false
+
+      - name: Validate Terraform configuration
+        run: terraform -chdir=infra/ec2-demo validate
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build the web application
+        run: npm run build
+
+      - name: Build the production container
+        run: docker build --tag orbit-workspace:ci .
+
+      - name: Build the single-instance SQLite container
+        run: docker build --file Dockerfile.ec2 --tag orbit-workspace:ec2-ci .

@@ -1,0 +1,27 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: orbit-workspace-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: orbit-workspace
+      rules:
+        - alert: OrbitWorkspaceUnavailable
+          expr: kube_deployment_status_replicas_available{namespace="orbit",deployment="orbit-workspace"} < 1
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: Orbit Workspace has no available app replicas
+            description: The Orbit deployment has had fewer than one ready replica for more than three minutes.
+        - alert: OrbitWorkspaceBelowDesiredReplicas
+          expr: kube_deployment_status_replicas_available{namespace="orbit",deployment="orbit-workspace"} < kube_deployment_spec_replicas{namespace="orbit",deployment="orbit-workspace"}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Orbit Workspace is running below its desired replica count
+            description: Investigate pod health, scheduling, and database connectivity.

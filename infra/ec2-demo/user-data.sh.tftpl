@@ -1,0 +1,78 @@
+#!/bin/bash
+set -euo pipefail
+
+dnf install -y docker curl python3
+systemctl enable --now docker
+systemctl enable --now amazon-ssm-agent
+install -d -m 0750 /etc/orbit /var/lib/orbit
+chown 1000:1000 /var/lib/orbit
+printf '%s\n' '${runtime_name}' > /etc/orbit/runtime-parameter
+printf '%s\n' '${region}' > /etc/orbit/region
+printf '%s\n' '${image_uri}' > /etc/orbit/image-uri
+printf '%s\n' '${ecr_registry}' > /etc/orbit/ecr-registry
+chmod 0640 /etc/orbit/*
+
+cat > /usr/local/sbin/orbit-deploy <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+REGION="$(cat /etc/orbit/region)"
+PARAMETER="$(cat /etc/orbit/runtime-parameter)"
+IMAGE="$(cat /etc/orbit/image-uri)"
+REGISTRY="$(cat /etc/orbit/ecr-registry)"
+
+if [[ "$IMAGE" == *:bootstrap ]]; then
+  echo "Waiting for the first GitHub Actions image deployment."
+  exit 0
+fi
+
+aws ssm get-parameter --name "$PARAMETER" --with-decryption --query Parameter.Value --output text --region "$REGION" > /run/orbit-runtime.json
+chmod 0600 /run/orbit-runtime.json
+python3 -c 'import json; values=json.load(open("/run/orbit-runtime.json")); open("/run/orbit-runtime.env", "w").write("".join(f"{key}={value}\n" for key, value in values.items()))'
+chmod 0600 /run/orbit-runtime.env
+aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null
+docker pull "$IMAGE"
+docker rm -f orbit-workspace >/dev/null 2>&1 || true
+docker run --detach \
+  --name orbit-workspace \
+  --restart unless-stopped \
+  --env-file /run/orbit-runtime.env \
+  --volume /var/lib/orbit:/data \
+  --publish 4000:4000 \
+  "$IMAGE"
+rm -f /run/orbit-runtime.json /run/orbit-runtime.env
+
+for attempt in $(seq 1 30); do
+  if curl --fail --silent http://127.0.0.1:4000/api/health >/dev/null; then
+    echo "Orbit Workspace is healthy on the EC2 instance."
+    exit 0
+  fi
+  sleep 2
+done
+
+docker logs --tail 80 orbit-workspace
+exit 1
+SCRIPT
+chmod 0750 /usr/local/sbin/orbit-deploy
+
+cat > /etc/systemd/system/orbit-deploy.service <<'UNIT'
+[Unit]
+Description=Deploy Orbit Workspace container
+After=docker.service amazon-ssm-agent.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/orbit-deploy
+TimeoutStartSec=0
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable orbit-deploy.service
+systemctl start orbit-deploy.service || true
